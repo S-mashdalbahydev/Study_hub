@@ -1,0 +1,12 @@
+use_default_settings: true
+general:
+  instance_name: StudyHub Search
+server:
+  # Placeholder only: compose sets SEARXNG_SECRET from .env, which takes precedence.
+  secret_key: replaced-by-SEARXNG_SECRET
+  limiter: false
+  image_proxy: false
+search:
+  formats:
+    - html
+    - json

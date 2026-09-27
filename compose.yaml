@@ -1,0 +1,200 @@
+name: studyhub
+services:
+  web:
+    build: ./apps/web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${STUDY_WEB_PORT:-3001}:3000"
+    environment:
+      STUDY_API_INTERNAL_URL: http://study-api:8000
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5544}:5432"
+    environment:
+      POSTGRES_DB: studyhub
+      POSTGRES_USER: studyhub_owner
+      POSTGRES_PASSWORD: ${POSTGRES_OWNER_PASSWORD:?Set POSTGRES_OWNER_PASSWORD in .env}
+      STUDYHUB_APP_DB_PASSWORD: ${STUDYHUB_APP_DB_PASSWORD:?Set STUDYHUB_APP_DB_PASSWORD in .env}
+      STUDYHUB_WORKER_DB_PASSWORD: ${STUDYHUB_WORKER_DB_PASSWORD:?Set STUDYHUB_WORKER_DB_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: [CMD, pg_isready, -U, studyhub_owner, -d, studyhub]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  # Applies schema migrations as the owner, then exits. Everything else waits for it.
+  migrate:
+    build: ./apps/study-api
+    restart: "no"
+    command: [alembic, upgrade, head]
+    environment:
+      DATABASE_OWNER_URL: postgresql://studyhub_owner:${POSTGRES_OWNER_PASSWORD}@postgres:5432/studyhub
+    depends_on:
+      postgres:
+        condition: service_healthy
+  study-api:
+    build: ./apps/study-api
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${STUDY_API_PORT:-8000}:8000"
+    environment: &api-env
+      DATABASE_URL: postgresql://studyhub_app:${STUDYHUB_APP_DB_PASSWORD}@postgres:5432/studyhub
+      DATABASE_WORKER_URL: postgresql://studyhub_worker:${STUDYHUB_WORKER_DB_PASSWORD}@postgres:5432/studyhub
+      STUDYHUB_SECRET_KEY: ${STUDYHUB_SECRET_KEY:?Set STUDYHUB_SECRET_KEY in .env}
+      STUDYHUB_COOKIE_SECURE: ${STUDYHUB_COOKIE_SECURE:-false}
+      STUDYHUB_SIGNUP_OPEN: ${STUDYHUB_SIGNUP_OPEN:-true}
+      STUDYHUB_TRASH_RETENTION_DAYS: ${STUDYHUB_TRASH_RETENTION_DAYS:-30}
+      STUDYHUB_ACCOUNT_DELETION_GRACE_DAYS: ${STUDYHUB_ACCOUNT_DELETION_GRACE_DAYS:-30}
+      STUDYHUB_ALLOW_PRIVATE_PROVIDER_URLS: ${STUDYHUB_ALLOW_PRIVATE_PROVIDER_URLS:-true}
+      STUDY_OBJECTS_PATH: /objects
+      STUDY_DATA_PATH: /data
+      DOCLING_URL: http://docling:5001
+      SEARXNG_URL: http://searxng:8080
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      TUTOR_PROVIDER: ${TUTOR_PROVIDER:-auto}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-}
+      OLLAMA_CHAT_URLS: ${OLLAMA_CHAT_URLS:-}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-embeddinggemma:300m}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - studyhub-objects:/objects
+      # The pre-accounts data, read only; used once by the legacy import.
+      - ./data:/data:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  # Background jobs (parsing, embedding, research). Scale with: docker compose up -d --scale worker=3
+  worker:
+    build: ./apps/study-api
+    restart: unless-stopped
+    command: [python, -m, app.worker, --queues, "ingest,research", --concurrency, "1"]
+    environment: *api-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - studyhub-objects:/objects
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  # Legacy chat client from the single-user era. Not started by default and cannot reach
+  # documents (the gateway now requires sign-in). Start with: docker compose --profile legacy up -d
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.11.3
+    profiles: [legacy]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${OPEN_WEBUI_PORT:-3000}:8080"
+    environment:
+      WEBUI_AUTH: "False"
+      ENABLE_OLLAMA_API: "False"
+      ENABLE_OPENAI_API: "True"
+      OPENAI_API_BASE_URL: http://study-api:8000/v1
+      OPENAI_API_KEY: studyhub-local
+      ENABLE_BASE_MODELS_CACHE: "False"
+      MODELS_CACHE_TTL: "1"
+      DEFAULT_MODELS: studyhub-auto
+      ENABLE_TITLE_GENERATION: "False"
+      ENABLE_TAGS_GENERATION: "False"
+      ENABLE_FOLLOW_UP_GENERATION: "False"
+      ENABLE_AUTOCOMPLETE_GENERATION: "False"
+      ENABLE_PERSISTENT_CONFIG: "False"
+      RAG_EMBEDDING_MODEL_AUTO_UPDATE: "False"
+      OFFLINE_MODE: "True"
+      HF_HUB_OFFLINE: "1"
+      DO_NOT_TRACK: "True"
+      ANONYMIZED_TELEMETRY: "False"
+    volumes:
+      - open-webui-data:/app/backend/data
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 10
+  ollama:
+    image: ollama/ollama:0.34.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${OLLAMA_PORT:-11435}:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: [CMD, ollama, list]
+      interval: 15s
+      timeout: 10s
+      start_period: 30s
+      retries: 10
+  # Vectors now live in PostgreSQL. Chroma is kept only so the one-time legacy import can read it.
+  chromadb:
+    image: chromadb/chroma:1.5.9
+    profiles: [legacy]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CHROMA_PORT:-8001}:8000"
+    volumes:
+      - chroma-data:/data
+  docling:
+    image: ghcr.io/docling-project/docling-serve-cpu:v1.32.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${DOCLING_PORT:-5001}:5001"
+    environment:
+      DOCLING_DEVICE: cpu
+      DOCLING_SERVE_ENABLE_UI: "false"
+      # CPU conversion of full books routinely exceeds Docling Serve's
+      # two-minute synchronous default. StudyHub's worker is already
+      # asynchronous from the UI, so allow the request to finish.
+      DOCLING_SERVE_MAX_SYNC_WAIT: ${DOCLING_MAX_SYNC_WAIT:-3600}
+      DOCLING_SERVE_MAX_DOCUMENT_TIMEOUT: ${DOCLING_MAX_DOCUMENT_TIMEOUT:-3600}
+      HF_HOME: /opt/app-root/src/.cache/huggingface
+    volumes:
+      - docling-cache:/opt/app-root/src/.cache
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:5001/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      start_period: 180s
+      retries: 10
+  searxng:
+    image: ghcr.io/searxng/searxng:2026.9.11-61d660276
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${SEARXNG_PORT:-8081}:8080"
+    environment:
+      # Overrides the placeholder secret_key in settings.yml; keep the real value in .env.
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?Set SEARXNG_SECRET in .env}
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - searxng-cache:/var/cache/searxng
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:8080/healthz]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+volumes:
+  postgres-data:
+  studyhub-objects:
+  open-webui-data:
+  chroma-data:
+  docling-cache:
+  searxng-cache:
+  ollama-data:

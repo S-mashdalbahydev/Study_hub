@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------- secrets
+# Never commit credentials. This covers .env, .env.example, .env.local and every variant.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+secrets/
+
+# ---------------------------------------------------------------- internal documents
+# All Markdown stays private except the public README and the tutor prompt template the
+# API loads at runtime (apps/study-api/app/prompts/document.md is code, not a note).
+*.md
+!/README.md
+!/apps/study-api/app/prompts/*.md
+# Design notes, runbooks, demo material and session reports. Only the README's images ship.
+/docs/*
+!/docs/images/
+/reports/
+
+# ---------------------------------------------------------------- personal and local data
+# Books, parsed text, databases and backups: user content, never source code.
+/data/*
+!/data/.gitkeep
+/library/*
+!/library/.gitkeep
+/apps/study-api/data/
+/apps/study-api/library/
+/objects/
+*.sqlite3
+*.sqlite3-*
+*.db
+*.dump
+*.sql.gz
+
+# ---------------------------------------------------------------- tools and editors
+.agents/
+.codex/
+.claude/
+.cursor/
+.vscode/
+.idea/
+.DS_Store
+*.log
+
+# ---------------------------------------------------------------- build and test output
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+htmlcov/
+.coverage
+node_modules/
+.next/
+test-results*/
+playwright-report/
+*.tsbuildinfo
